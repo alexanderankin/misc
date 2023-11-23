@@ -1,3 +1,12 @@
 plugins {
     id 'conventions'
 }
+
+dependencies {
+    implementation 'com.h2database:h2'
+    implementation 'com.zaxxer:HikariCP'
+    implementation 'org.springframework.boot:spring-boot'
+    implementation 'org.springframework.data:spring-data-jdbc'
+    implementation 'org.slf4j:slf4j-api'
+    implementation 'org.slf4j:slf4j-simple'
+}
