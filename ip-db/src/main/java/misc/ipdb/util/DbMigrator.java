@@ -22,7 +22,7 @@ public class DbMigrator {
                 try (Statement statement = connection.createStatement()) {
                     for (Migration value : Migration.values()) {
                         for (String query : value.getSql().split(";")) {
-                            statement.  execute(query);
+                            statement.execute(query);
                         }
                     }
                 }
@@ -38,6 +38,7 @@ public class DbMigrator {
         new DbMigrator(DbFactory.INSTANCE.dataSource()).migrate();
     }
 
+    @SuppressWarnings("SqlDialectInspection")
     @RequiredArgsConstructor
     @Getter
     enum Migration {
@@ -48,21 +49,33 @@ public class DbMigrator {
                             id          serial       primary key,
                             name        varchar(500) not null unique,
                             description varchar(500) null,
-                            min         bytea        null, -- default max space
-                            max         bytea        null
+                            version     smallint     not null,
+                            min         numeric(39)  null, -- default max space
+                            max         numeric(39)  null
                         )
                         """),
 
-        IP_RANGE("create ip range",
+        IP_RANGES("create ip ranges",
                 // language=sql
                 """
-                        create table ip_range(
+                        create table ip_range_v4(
                             id          serial       primary key,
                             ip_space_id integer      not null references ip_space(id),
-                            name        varchar(500) not null unique,
+                            name        varchar(500) not null,
                             description varchar(500) null,
-                            min         bytea        not null,
-                            max         bytea        not null
+                            min         numeric(10)  not null,
+                            max         numeric(10)  not null,
+                            unique (ip_space_id, name)
+                        );
+
+                        create table ip_range_v6(
+                            id          serial       primary key,
+                            ip_space_id integer      not null references ip_space(id),
+                            name        varchar(500) not null,
+                            description varchar(500) null,
+                            min         numeric(39)  not null,
+                            max         numeric(39)  not null,
+                            unique (ip_space_id, name)
                         )
                         """),
         ;

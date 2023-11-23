@@ -1,23 +1,37 @@
 package misc.ipdb;
 
 import lombok.*;
+import lombok.experimental.Accessors;
 import misc.ipdb.util.DbFactory;
 import misc.ipdb.util.DbMigrator;
+import misc.ipdb.util.IpRangeConflictsException;
+import org.springframework.jdbc.core.BeanPropertyRowMapper;
+import org.springframework.jdbc.core.ColumnMapRowMapper;
 import org.springframework.jdbc.core.namedparam.BeanPropertySqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.core.simple.SimpleJdbcInsert;
 
 import java.math.BigInteger;
 import java.util.*;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 @RequiredArgsConstructor
 public class IpDbService {
+    private static final ColumnMapRowMapper COLUMN_MAP_ROW_MAPPER = new ColumnMapRowMapper();
     final NamedParameterJdbcTemplate jdbcTemplate;
+    final JdbcClient jdbcClient;
     SimpleJdbcInsert ipSpace;
-    SimpleJdbcInsert ipRange;
+    SimpleJdbcInsert ipRangeV4;
+    SimpleJdbcInsert ipRangeV6;
 
     public IpDbService(DbFactory dbFactory) {
         this(new NamedParameterJdbcTemplate(dbFactory.dataSource()));
+    }
+
+    IpDbService(NamedParameterJdbcTemplate namedParameterJdbcTemplate) {
+        this(namedParameterJdbcTemplate, JdbcClient.create(namedParameterJdbcTemplate));
     }
 
     public DbMigrator dbMigrator() {
@@ -45,17 +59,33 @@ public class IpDbService {
     }
 
     public IpRange reserve(IpRange ipRange) {
-        int count = find(ipRange);
+        IpVersion ipVersion;
+        {
+            IpSpace space = jdbcTemplate.getJdbcTemplate().queryForObject("select version from ip_space where id = ?",
+                    new BeanPropertyRowMapper<>(IpSpace.class),
+                    ipRange.getIpSpaceId());
 
-        if (count > 0) throw new IllegalArgumentException("conflicts");
+            Objects.requireNonNull(space);
+            Objects.requireNonNull(space.getVersion());
+            ipVersion = space.getIpVersion();
+        }
+        int count = find(ipVersion, ipRange);
 
-        int id = getIpRangeInsert().execute(new BeanPropertySqlParameterSource(ipRange.toEntity()));
+        if (count > 0) {
+            System.out.println(findRanges(ipVersion, ipRange));
+            throw new IpRangeConflictsException();
+        }
 
-        return new IpRange(id, ipRange.name, ipRange.description, ipRange.ipSpace, ipRange.minInclusive, ipRange.maxExclusive);
+        int id = (int) (switch (ipVersion) {
+            case V4 -> getIpRangeInsertV4();
+            case V6 -> getIpRangeInsertV6();
+        }).executeAndReturnKey(new BeanPropertySqlParameterSource(ipRange));
+
+        return ipRange.setId(id);
     }
 
-    @SuppressWarnings({"SqlDialectInspection", "DataFlowIssue"})
-    int find(IpRange ipRange) {
+    @SuppressWarnings({"SqlDialectInspection"})
+    int find(IpVersion ipVersion, IpRange ipRange) {
         /*
             --------|_----1---|_----2---|_--------
             -----X--|_------X-|_--------|_-------- - find 1 - min is less than max, max is more than max
@@ -65,52 +95,57 @@ public class IpDbService {
             -----X--|X--------|_--------|_-------- - find 1 - min is inclusive
             --------|_--------|_--------|_---X---X - find null
          */
-        return jdbcTemplate.queryForObject("""
-                        select count(*) from ip_range
-                        where
-                            (min <= :min and max > :min) or
-                            (min <= :max and max > :max)
-                        """,
-                Map.of(
-                        "min", ipRange.minInclusive().value(),
-                        "max", ipRange.maxExclusive().value()
-                ),
-                Integer.class
-        );
+        return jdbcClient.sql("select count(*) from ip_range_v" + ipVersion.getVersion() + " where " +
+                        "((min <= :min and max > :min) or (min < :max and max > :max)) " +
+                        "and ip_space_id = :ip_space")
+                .params(Map.of(
+                        "ip_space", ipRange.getIpSpaceId(),
+                        "min", ipRange.getMin(),
+                        "max", ipRange.getMax()
+                ))
+                .query(Integer.class)
+                .single();
     }
 
-    static public class Demo {
-        final List<Map.Entry<Integer, Integer>> ranges = new ArrayList<>();
-        void add(Map.Entry<Integer, Integer> range) {
-            boolean conflicts = isConflicts(range);
-            if (!conflicts) ranges.add(range);
-        }
+    List<IpRange> findRanges(IpVersion ipVersion, IpRange ipRange) {
+        /*
+            --------|_----1---|_----2---|_--------
+            -----X--|_------X-|_--------|_-------- - find 1 - min is less than max, max is more than max
+            --------|_--------|_-------X|_-X------ - find 2 - min is less than min, max is more than min
+            --------|_--------|_----X-X-|_-------- - find 2 - min is less than min, max is more than min
+            --------|_--------|_--------|x---x---- - find null - max is exclusive
+            -----X--|X--------|_--------|_-------- - find 1 - min is inclusive
+            --------|_--------|_--------|_---X---X - find null
+         */
 
-        private boolean isConflicts(Map.Entry<Integer, Integer> range) {
-            return ranges.stream().anyMatch(each -> {
-                boolean b = (each.getKey() <= range.getKey() && each.getValue() > range.getKey()) ||
-                        (each.getKey() <= range.getValue() && each.getValue() > range.getValue());
-
-                return b;
-            });
-        }
-
-        public static void main(String[] args) {
-            var demo = new Demo();
-            demo.add(Map.entry(3, 5));
-            System.out.println(demo.isConflicts(Map.entry(1, 2)));
-            System.out.println(demo.isConflicts(Map.entry(1, 3)));
-            System.out.println(demo.isConflicts(Map.entry(5, 6)));
-            System.out.println(demo.isConflicts(Map.entry(4, 6)));
-        }
+        return jdbcClient.sql("select * from ip_range_v" + ipVersion.getVersion() + " " +
+                        """
+                                where ((min <= :min and max > :min) or (min < :max and max > :max))
+                                and ip_space_id = :ip_space
+                                """)
+                .params(Map.of(
+                        "ip_space", ipRange.getIpSpaceId(),
+                        "min", ipRange.getMin(),
+                        "max", ipRange.getMax()
+                ))
+                .query(IpRange.class)
+                .list();
     }
 
-    private SimpleJdbcInsert getIpRangeInsert() {
-        if (ipRange == null)
-            ipRange = new SimpleJdbcInsert(jdbcTemplate.getJdbcTemplate())
-                    .withTableName("ip_range")
+    private SimpleJdbcInsert getIpRangeInsertV4() {
+        if (ipRangeV4 == null)
+            ipRangeV4 = new SimpleJdbcInsert(jdbcTemplate.getJdbcTemplate())
+                    .withTableName("ip_range_v4")
                     .usingGeneratedKeyColumns("id");
-        return ipRange;
+        return ipRangeV4;
+    }
+
+    private SimpleJdbcInsert getIpRangeInsertV6() {
+        if (ipRangeV6 == null)
+            ipRangeV6 = new SimpleJdbcInsert(jdbcTemplate.getJdbcTemplate())
+                    .withTableName("ip_range_v6")
+                    .usingGeneratedKeyColumns("id");
+        return ipRangeV6;
     }
 
     public IpRange delete(IpSpace ipSpace, IpRange ipRange) {
@@ -118,7 +153,6 @@ public class IpDbService {
     }
 
     public static void main(String[] args) {
-        Demo.main(args);
         // System.out.println(Arrays.toString(IpAddress.parseIpV4("1.1.1.1")));
         // System.out.println(Arrays.toString(new BigInteger("16843009").toByteArray()));
         // System.out.println(Arrays.toString(IpAddress.parseIpV6("2001:0000:130F:0000:0000:09C0:876A:130B")));
@@ -127,8 +161,9 @@ public class IpDbService {
     }
 
     public IpSpace create(IpSpace space) {
-        int id = getIpSpaceInsert().execute(new BeanPropertySqlParameterSource(space.toEntity()));
-        return new IpSpace(id, space.name, space.description, space.totalRange);
+        int id = (int) getIpSpaceInsert().executeAndReturnKey(new BeanPropertySqlParameterSource(space));
+        space.setId(id);
+        return space;
     }
 
     private SimpleJdbcInsert getIpSpaceInsert() {
@@ -140,67 +175,95 @@ public class IpDbService {
     }
 
     public IpSpace delete(IpSpace space) {
-        int updated = jdbcTemplate.getJdbcTemplate().update("delete from ip_space where id = ?", Objects.requireNonNull(space.id()));
+        int updated = jdbcTemplate.getJdbcTemplate().update("delete from ip_space where id = ?", Objects.requireNonNull(space.getId()));
         return updated == 0 ? null : space;
     }
 
-    public record IpSpace(Integer id, String name, String description, IpRange totalRange) {
+    @Data
+    @Accessors(chain = true)
+    public static class IpSpace {
+        Integer id;
+        String name;
+        String description;
+        Integer version;
+        transient IpVersion ipVersion;
+        BigInteger min;
+        BigInteger max;
 
-        Entity toEntity() {
-            return new Entity(
-                    null,
-                    name(),
-                    description(),
-                    Optional.ofNullable(totalRange()).map(IpRange::minInclusive).map(IpAddress::value).orElse(null),
-                    Optional.ofNullable(totalRange()).map(IpRange::maxExclusive).map(IpAddress::value).orElse(null)
-            );
+        public IpVersion getIpVersion() {
+            if (version == null) return null;
+            if (ipVersion == null) ipVersion = IpVersion.from(version);
+            return ipVersion;
         }
 
-        @Value
-        static class Entity {
-            Integer id;
-            String name;
-            String description;
-            byte[] max;
-            byte[] min;
-        }
-    }
-
-    public record IpRange(Integer id, String name, String description, IpSpace ipSpace, IpAddress minInclusive,
-                          IpAddress maxExclusive) {
-        Entity toEntity() {
-            return new IpRange.Entity(
-                    id,
-                    Optional.ofNullable(ipSpace()).map(IpSpace::id).orElse(null),
-                    name(),
-                    description(),
-                    Optional.ofNullable(minInclusive()).map(IpAddress::value).orElse(null),
-                    Optional.ofNullable(maxExclusive()).map(IpAddress::value).orElse(null)
-            );
-        }
-
-        @Data
-        @AllArgsConstructor
-        @NoArgsConstructor
-        static class Entity {
-            Integer id;
-            Integer ipSpaceId;
-            String name;
-            String description;
-            byte[] min;
-            byte[] max;
+        public IpSpace setIpVersion(IpVersion ipVersion) {
+            version = ipVersion.getVersion();
+            this.ipVersion = ipVersion;
+            return this;
         }
     }
 
-    public enum IpVersion {V4, V6}
+    @Data
+    @Accessors(chain = true)
+    public static class IpRange {
+        Integer id;
+        Integer ipSpaceId;
+        String name;
+        String description;
+        BigInteger min;
+        BigInteger max;
+
+        public IpRange setMinFromIp(IpAddress ipAddress) {
+            return setMin(ipAddress.toBigInteger());
+        }
+
+        public IpRange setMaxFromIp(IpAddress ipAddress) {
+            return setMax(ipAddress.toBigInteger());
+        }
+    }
+
+    @RequiredArgsConstructor
+    @Getter
+    public enum IpVersion {
+        V4(4), V6(6),
+        ;
+        private static final Map<Integer, IpVersion> BY_VERSION =
+                Arrays.stream(values())
+                        .collect(Collectors.toMap(IpVersion::getVersion, Function.identity()));
+
+        private final int version;
+
+        public static IpVersion from(int version) {
+            return BY_VERSION.get(version);
+        }
+    }
 
     public record IpAddress(String address, byte[] value, IpVersion version) {
+        BigInteger toBigInteger() {
+            return new BigInteger(value);
+        }
+
+        public static IpAddress from(String value, IpVersion ipVersion) {
+            return switch (ipVersion) {
+                case V4 -> v4(value);
+                case V6 -> v6(value);
+            };
+        }
+
+        public static IpAddress v4(BigInteger value) {
+            return v4(value.toByteArray());
+        }
+
         public static IpAddress v4(String address) {
             return new IpAddress(address, parseIpV4(address), IpVersion.V4);
         }
 
         public static IpAddress v4(byte[] value) {
             return new IpAddress(serializeIpV4(value), value, IpVersion.V4);
+        }
+
+        public static IpAddress v6(BigInteger value) {
+            return v6(value.toByteArray());
         }
 
         public static IpAddress v6(String address) {
