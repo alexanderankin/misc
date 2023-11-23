@@ -1,87 +1,157 @@
 package misc.ipdb;
 
-import lombok.*;
+import lombok.Data;
+import lombok.Getter;
+import lombok.RequiredArgsConstructor;
 import lombok.experimental.Accessors;
+import lombok.extern.slf4j.Slf4j;
 import misc.ipdb.util.DbFactory;
 import misc.ipdb.util.DbMigrator;
+import misc.ipdb.util.IpDataNotFoundException;
 import misc.ipdb.util.IpRangeConflictsException;
-import org.springframework.jdbc.core.BeanPropertyRowMapper;
-import org.springframework.jdbc.core.ColumnMapRowMapper;
-import org.springframework.jdbc.core.namedparam.BeanPropertySqlParameterSource;
-import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.simple.JdbcClient;
-import org.springframework.jdbc.core.simple.SimpleJdbcInsert;
+import org.springframework.jdbc.support.GeneratedKeyHolder;
 
+import javax.sql.DataSource;
 import java.math.BigInteger;
 import java.util.*;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+@Slf4j
 @RequiredArgsConstructor
 public class IpDbService {
-    private static final ColumnMapRowMapper COLUMN_MAP_ROW_MAPPER = new ColumnMapRowMapper();
-    final NamedParameterJdbcTemplate jdbcTemplate;
+    final DataSource dataSource;
     final JdbcClient jdbcClient;
-    SimpleJdbcInsert ipSpace;
-    SimpleJdbcInsert ipRangeV4;
-    SimpleJdbcInsert ipRangeV6;
 
     public IpDbService(DbFactory dbFactory) {
-        this(new NamedParameterJdbcTemplate(dbFactory.dataSource()));
+        this(dbFactory.dataSource());
     }
 
-    IpDbService(NamedParameterJdbcTemplate namedParameterJdbcTemplate) {
-        this(namedParameterJdbcTemplate, JdbcClient.create(namedParameterJdbcTemplate));
+    IpDbService(DataSource dataSource) {
+        this(dataSource, JdbcClient.create(dataSource));
     }
 
     public DbMigrator dbMigrator() {
-        return new DbMigrator(jdbcTemplate.getJdbcTemplate().getDataSource());
+        return new DbMigrator(dataSource);
+    }
+
+    public IpSpace create(IpSpace space) {
+        var g = new GeneratedKeyHolder();
+        // return space.setId((int) getIpSpaceInsert().executeAndReturnKey(new BeanPropertySqlParameterSource(space)));
+        jdbcClient.sql("""
+                        insert into ip_space(name, description, version, min, max)\s
+                        values(:name, :description, :version, :min, :max)
+                        """)
+                .paramSource(space)
+                .update(g);
+        return space.setId(Objects.requireNonNull(g.getKey()).intValue());
+    }
+
+    public List<IpSpace> listSpaces(PageRequest pageRequest) {
+        return jdbcClient.sql("select * from ip_space limit ? offset ?").params(pageRequest.getPageSize(), pageRequest.getOffset()).query(IpSpace.class).list();
+    }
+
+    public IpSpace findSpace(int id) {
+        return jdbcClient.sql("select * from ip_space where id = ?").params(id).query(IpSpace.class).optional().orElse(null);
+    }
+
+    public IpSpace delete(IpSpace space) {
+        int updated = jdbcClient.sql("delete from ip_space where id = ?")
+                .param(Objects.requireNonNull(space.getId()))
+                .update();
+        return updated == 0 ? null : space;
+    }
+
+    public IpRange reserve(IpRange ipRange) {
+        IpVersion ipVersion = lookupIpVersion(ipRange);
+        int count = find(ipVersion, ipRange);
+
+        if (count > 0) {
+            if (log.isTraceEnabled())
+                log.trace("{}", findRanges(ipVersion, ipRange));
+            throw new IpRangeConflictsException();
+        }
+
+        int v = ipVersion.getVersion();
+        var g = new GeneratedKeyHolder();
+        jdbcClient.sql("insert into ip_range_v" + v +
+                        "(ip_space_id, name, description, min, max) " +
+                        "values (:ipSpaceId, :name, :description, :min, :max)")
+                .paramSource(ipRange)
+                .update(g);
+
+        int id = Objects.requireNonNull(g.getKey()).intValue();
+
+        return ipRange.setId(id);
+    }
+
+    public List<IpRange> listRanges(int ipSpaceId, PageRequest pageRequest) {
+        return listRanges(findSpace(ipSpaceId), pageRequest);
+    }
+
+    public List<IpRange> listRanges(IpSpace ipSpace, PageRequest pageRequest) {
+        return jdbcClient
+                .sql("select * from ip_range_v" + ipSpace.getIpVersion().getVersion() +
+                        " where ip_space_id = ? limit ? offset ?")
+                .params(ipSpace.getId(), pageRequest.getPageSize(), pageRequest.getOffset())
+                .query(IpRange.class)
+                .list();
+    }
+
+    public IpRange release(IpRange ipRange) {
+        return jdbcClient.sql("delete from ip_range_v" + lookupIpVersion(ipRange).getVersion() + " where id = ?")
+                .params(Objects.requireNonNull(ipRange.getId()))
+                .update() == 0 ? null : ipRange;
     }
 
     // returns if this ip address is within any of the ranges (or not)
-    public boolean free(IpAddress ipAddress) {
-        throw new UnsupportedOperationException();
+    public boolean free(IpSpace ipSpace, IpAddress ipAddress) {
+        int v = ipSpace.getIpVersion().getVersion();
+        return 0 == jdbcClient.sql("select count(*) from ip_range_v" + v + " " + """
+                        where (min >= :value and max < :value)
+                        and ip_space_id = :ip_space
+                        """)
+                .params(Map.of("value", ipAddress.toBigInteger(),
+                        "ip_space", ipSpace.getId()))
+                .query(Integer.class)
+                .single();
     }
 
     // returns if any addresses in this range are within any of the ranges (or not)
     public boolean free(IpRange ipRange) {
-        throw new UnsupportedOperationException();
+        return 0 == find(lookupIpVersion(ipRange), ipRange);
     }
 
     // find list of ip ranges which contain addresses within this ip range
     public List<IpRange> foundWithin(IpRange ipRange) {
-        throw new UnsupportedOperationException();
+        return findRanges(lookupIpVersion(ipRange), ipRange);
     }
 
     // find the range containing this ip address (or null if not found)
-    public IpRange rangeOf(IpAddress ipAddress) {
-        throw new UnsupportedOperationException();
+    public IpRange rangeOf(int ipSpaceId, IpAddress ipAddress) {
+        return rangeOf(findSpace(ipSpaceId), ipAddress);
     }
 
-    public IpRange reserve(IpRange ipRange) {
-        IpVersion ipVersion;
-        {
-            IpSpace space = jdbcTemplate.getJdbcTemplate().queryForObject("select version from ip_space where id = ?",
-                    new BeanPropertyRowMapper<>(IpSpace.class),
-                    ipRange.getIpSpaceId());
+    // find the range containing this ip address (or null if not found)
+    public IpRange rangeOf(IpSpace ipSpace, IpAddress ipAddress) {
+        return jdbcClient.sql("select * from ip_range_v" + ipSpace.getIpVersion().getVersion() +
+                        " where ip_space_id = :ip_space_id and min >= :value and max < :value")
+                .params(Map.of("ip_space_id", ipSpace.getId(), "value", ipAddress.toBigInteger()))
+                .query(IpRange.class)
+                .optional().orElse(null);
+    }
 
-            Objects.requireNonNull(space);
-            Objects.requireNonNull(space.getVersion());
-            ipVersion = space.getIpVersion();
-        }
-        int count = find(ipVersion, ipRange);
-
-        if (count > 0) {
-            System.out.println(findRanges(ipVersion, ipRange));
-            throw new IpRangeConflictsException();
-        }
-
-        int id = (int) (switch (ipVersion) {
-            case V4 -> getIpRangeInsertV4();
-            case V6 -> getIpRangeInsertV6();
-        }).executeAndReturnKey(new BeanPropertySqlParameterSource(ipRange));
-
-        return ipRange.setId(id);
+    private IpVersion lookupIpVersion(IpRange ipRange) {
+        if (ipRange.getIpSpace() != null && ipRange.getIpSpace().getIpVersion() != null)
+            return ipRange.getIpSpace().getIpVersion();
+        return jdbcClient.sql("select version from ip_space where id = ?")
+                .params(ipRange.getIpSpaceId())
+                .query(Integer.class)
+                .optional()
+                .map(IpVersion::from)
+                .orElseThrow(IpDataNotFoundException::new);
     }
 
     @SuppressWarnings({"SqlDialectInspection"})
@@ -132,51 +202,12 @@ public class IpDbService {
                 .list();
     }
 
-    private SimpleJdbcInsert getIpRangeInsertV4() {
-        if (ipRangeV4 == null)
-            ipRangeV4 = new SimpleJdbcInsert(jdbcTemplate.getJdbcTemplate())
-                    .withTableName("ip_range_v4")
-                    .usingGeneratedKeyColumns("id");
-        return ipRangeV4;
-    }
-
-    private SimpleJdbcInsert getIpRangeInsertV6() {
-        if (ipRangeV6 == null)
-            ipRangeV6 = new SimpleJdbcInsert(jdbcTemplate.getJdbcTemplate())
-                    .withTableName("ip_range_v6")
-                    .usingGeneratedKeyColumns("id");
-        return ipRangeV6;
-    }
-
-    public IpRange delete(IpSpace ipSpace, IpRange ipRange) {
-        throw new UnsupportedOperationException();
-    }
-
     public static void main(String[] args) {
         // System.out.println(Arrays.toString(IpAddress.parseIpV4("1.1.1.1")));
         // System.out.println(Arrays.toString(new BigInteger("16843009").toByteArray()));
         // System.out.println(Arrays.toString(IpAddress.parseIpV6("2001:0000:130F:0000:0000:09C0:876A:130B")));
         // System.out.println(new BigInteger(IpAddress.parseIpV6("2001:0000:130F:0000:0000:09C0:876A:130B")));
         // System.out.println(IpAddress.serializeIpV6(IpAddress.parseIpV6("2001:0000:130F:0000:0000:09C0:876A:130B")));
-    }
-
-    public IpSpace create(IpSpace space) {
-        int id = (int) getIpSpaceInsert().executeAndReturnKey(new BeanPropertySqlParameterSource(space));
-        space.setId(id);
-        return space;
-    }
-
-    private SimpleJdbcInsert getIpSpaceInsert() {
-        if (ipSpace == null)
-            ipSpace = new SimpleJdbcInsert(jdbcTemplate.getJdbcTemplate())
-                    .withTableName("ip_space")
-                    .usingGeneratedKeyColumns("id");
-        return ipSpace;
-    }
-
-    public IpSpace delete(IpSpace space) {
-        int updated = jdbcTemplate.getJdbcTemplate().update("delete from ip_space where id = ?", Objects.requireNonNull(space.getId()));
-        return updated == 0 ? null : space;
     }
 
     @Data
@@ -212,6 +243,7 @@ public class IpDbService {
         String description;
         BigInteger min;
         BigInteger max;
+        transient IpSpace ipSpace;
 
         public IpRange setMinFromIp(IpAddress ipAddress) {
             return setMin(ipAddress.toBigInteger());
@@ -251,7 +283,11 @@ public class IpDbService {
         }
 
         public static IpAddress v4(BigInteger value) {
-            return v4(value.toByteArray());
+            byte[] byteArray = value.toByteArray();
+            byte[] padded = new byte[4];
+            Arrays.fill(padded, (byte) 0);
+            System.arraycopy(byteArray, 0, padded, padded.length - byteArray.length, byteArray.length);
+            return v4(padded);
         }
 
         public static IpAddress v4(String address) {
@@ -263,7 +299,11 @@ public class IpDbService {
         }
 
         public static IpAddress v6(BigInteger value) {
-            return v6(value.toByteArray());
+            byte[] byteArray = value.toByteArray();
+            byte[] padded = new byte[16];
+            Arrays.fill(padded, (byte) 0);
+            System.arraycopy(byteArray, 0, padded, padded.length - byteArray.length, byteArray.length);
+            return v6(padded);
         }
 
         public static IpAddress v6(String address) {

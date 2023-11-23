@@ -8,5 +8,6 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot'
     implementation 'org.springframework.data:spring-data-jdbc'
     implementation 'org.slf4j:slf4j-api'
-    implementation 'org.slf4j:slf4j-simple'
+    // for prototyping
+    // implementation 'org.slf4j:slf4j-simple'
 }
