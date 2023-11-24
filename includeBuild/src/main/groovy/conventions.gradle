@@ -2,6 +2,7 @@ plugins {
     id 'java'
     id 'jacoco'
     id 'idea'
+    id 'org.springframework.boot' // version '3.2.0'
 }
 
 java {

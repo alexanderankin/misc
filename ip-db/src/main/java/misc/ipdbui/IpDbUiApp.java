@@ -69,10 +69,23 @@ class IpDbUiApp {
             return "space";
         }
 
+        @PostMapping("/spaces")
+        String createSpace(@RequestBody MultiValueMap<String, String> map) {
+            var ipSpace = objectMapper.convertValue(map.toSingleValueMap(), IpSpace.class);
+            apiRouter.spaces(ipSpace);
+            return "redirect:/";
+        }
+
+        @GetMapping("/spaces/{id}/delete")
+        String deleteSpace(@PathVariable("id") int id) {
+            apiRouter.deleteSpace(id);
+            return "redirect:/";
+        }
+
         @PostMapping("/spaces/{id}/new-range")
-        String home(@RequestBody MultiValueMap<String, String> map) {
+        String createRange(@PathVariable("id") int id, @RequestBody MultiValueMap<String, String> map) {
             var ipRangeDto = objectMapper.convertValue(map.toSingleValueMap(), IpRangeDto.class);
-            apiRouter.createRange(ipRangeDto.getIpSpaceId(), ipRangeDto);
+            apiRouter.createRange(id, ipRangeDto);
             return "redirect:/spaces/" + ipRangeDto.getIpSpaceId();
         }
 

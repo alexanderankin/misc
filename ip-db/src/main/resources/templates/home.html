@@ -71,6 +71,7 @@
                 <th scope="col">Description</th>
                 <th scope="col">IP Version</th>
                 <th scope="col">Max Range</th>
+                <th scope="col">Delete</th>
             </tr>
             </thead>
             <tbody>
@@ -80,9 +81,41 @@
                 <td th:text="${row.description}"></td>
                 <td>IPV<span th:text="${row.version}"></span></td>
                 <td><span th:text="${min}"></span> - <span th:text="${row.max}"></span></td>
+                <td><a th:href="${'/spaces/' + row.id + '/delete'}">Delete</a></td>
             </tr>
             </tbody>
         </table>
+
+        <hr class="col-1 my-4">
+
+        <h2>Add an IP Space:</h2>
+
+        <form method="POST" action="/spaces">
+            <div class="mb-3">
+                <label for="new-range-name" class="form-label">Name</label>
+                <input type="text" class="form-control" name=name id="new-range-name" placeholder="new range">
+            </div>
+            <div class="mb-3">
+                <label for="new-range-description" class="form-label">Description</label>
+                <input type="text" class="form-control" name=description id="new-range-description" placeholder="new range">
+            </div>
+            <div class="mb-3">
+                <select class="form-select" aria-label="Select IP version (4/6)" name="version">
+                    <option selected value="4">IPV4</option>
+                    <option value="6">IPV6</option>
+                </select>
+            </div>
+            <div class="mb-3">
+                <label for="new-range-min" class="form-label">Minimum IP Address</label>
+                <input type="text" class="form-control" name=min id="new-range-min" placeholder="0.0.0.0">
+            </div>
+            <div class="mb-3">
+                <label for="new-range-max" class="form-label">Maximum IP Address</label>
+                <input type="text" class="form-control" name=max id="new-range-max" placeholder="10.0.0.255">
+            </div>
+            <input type="submit" value="Submit" class="btn btn-success">
+            <!--<button class="btn btn-success" formaction="submit"></button>-->
+        </form>
 
         <hr class="col-1 my-4">
 
