@@ -22,6 +22,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
 import org.springframework.util.MultiValueMap;
+import org.springframework.util.StringUtils;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
@@ -29,6 +30,7 @@ import org.springframework.web.server.ResponseStatusException;
 import javax.sql.DataSource;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 import static org.springframework.http.HttpStatus.BAD_REQUEST;
 import static org.springframework.http.HttpStatus.NOT_FOUND;
@@ -58,7 +60,7 @@ class IpDbUiApp {
 
         @GetMapping("/")
         String home(Model model, Pageable pageable) {
-            model.addAttribute("spaces", apiRouter.spaces(pageable));
+            model.addAttribute("spaces", apiRouter.spaces(pageable).stream().map(IpSpaceDto::from).toList());
             return "home";
         }
 
@@ -71,8 +73,8 @@ class IpDbUiApp {
 
         @PostMapping("/spaces")
         String createSpace(@RequestBody MultiValueMap<String, String> map) {
-            var ipSpace = objectMapper.convertValue(map.toSingleValueMap(), IpSpace.class);
-            apiRouter.spaces(ipSpace);
+            var ipSpace = objectMapper.convertValue(map.toSingleValueMap(), IpSpaceDto.class);
+            apiRouter.spaces(ipSpace.toIpSpace());
             return "redirect:/";
         }
 
@@ -155,6 +157,8 @@ class IpDbUiApp {
         IpRangeDto createRange(@PathVariable("id") int id, @Valid @RequestBody IpRangeDto ipRange) {
             ipRange.setIpSpaceId(id);
             try {
+                // we would only know if its v4 or v6 at this stage if we include it as hidden inputs
+                // consider using hidden inputs instead
                 return IpRangeDto.from(ipDbService.reserve(ipRange.toIpRange(), ipRange.getMin(), ipRange.getMax()));
             } catch (IpDataNotFoundException e) {
                 throw new ResponseStatusException(NOT_FOUND);
@@ -174,6 +178,41 @@ class IpDbUiApp {
             }
         }
 
+    }
+
+    @Data
+    @Accessors(chain = true)
+    public static class IpSpaceDto {
+        Integer id;
+        @NotNull
+        String name;
+        String description;
+        @NotNull
+        Integer version;
+        String min;
+        String max;
+
+        static IpSpaceDto from(IpSpace ipSpace) {
+            return new IpSpaceDto()
+                    .setId(ipSpace.getId())
+                    .setName(ipSpace.getName())
+                    .setDescription(ipSpace.getDescription())
+                    .setVersion(ipSpace.getVersion())
+                    .setMin(Optional.ofNullable(ipSpace.getMin()).map(m -> IpDbService.IpAddress.from(m, ipSpace.getIpVersion()).address()).orElse(null))
+                    .setMax(Optional.ofNullable(ipSpace.getMax()).map(m -> IpDbService.IpAddress.from(m, ipSpace.getIpVersion()).address()).orElse(null))
+                    ;
+        }
+
+        IpSpace toIpSpace() {
+            return new IpSpace()
+                    .setId(id)
+                    .setName(name)
+                    .setDescription(description)
+                    .setVersion(version)
+                    .setMin(Optional.ofNullable(getMin()).filter(StringUtils::hasText).map(m -> IpDbService.IpAddress.from(m, IpDbService.IpVersion.from(version)).toBigInteger()).orElse(null))
+                    .setMax(Optional.ofNullable(getMax()).filter(StringUtils::hasText).map(m -> IpDbService.IpAddress.from(m, IpDbService.IpVersion.from(version)).toBigInteger()).orElse(null))
+                    ;
+        }
     }
 
     @Data

@@ -315,7 +315,7 @@ public class IpDbService {
     }
 
     public record IpAddress(String address, byte[] value, IpVersion version) {
-        BigInteger toBigInteger() {
+        public BigInteger toBigInteger() {
             return new BigInteger(value);
         }
 

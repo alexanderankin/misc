@@ -80,7 +80,7 @@
                 <td><a th:text="${row.name}" th:href="@{'/spaces/'+${row.id}}"></a></td>
                 <td th:text="${row.description}"></td>
                 <td>IPV<span th:text="${row.version}"></span></td>
-                <td><span th:text="${min}"></span> - <span th:text="${row.max}"></span></td>
+                <td><span th:text="${row.min}"></span> - <span th:text="${row.max}"></span></td>
                 <td><a th:href="${'/spaces/' + row.id + '/delete'}">Delete</a></td>
             </tr>
             </tbody>
