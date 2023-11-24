@@ -182,6 +182,7 @@ public class IpDbService {
                 .optional().orElse(null);
     }
 
+    // todo next: fetch whole space for bounds checking on the space
     private IpVersion lookupIpVersion(IpRange ipRange) {
         if (ipRange.getIpSpace() != null && ipRange.getIpSpace().getIpVersion() != null)
             return ipRange.getIpSpace().getIpVersion();
