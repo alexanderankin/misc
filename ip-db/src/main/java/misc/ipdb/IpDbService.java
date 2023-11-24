@@ -29,7 +29,7 @@ public class IpDbService {
         this(dbFactory.dataSource());
     }
 
-    IpDbService(DataSource dataSource) {
+    public IpDbService(DataSource dataSource) {
         this(dataSource, JdbcClient.create(dataSource));
     }
 
@@ -39,7 +39,6 @@ public class IpDbService {
 
     public IpSpace create(IpSpace space) {
         var g = new GeneratedKeyHolder();
-        // return space.setId((int) getIpSpaceInsert().executeAndReturnKey(new BeanPropertySqlParameterSource(space)));
         jdbcClient.sql("""
                         insert into ip_space(name, description, version, min, max)\s
                         values(:name, :description, :version, :min, :max)
@@ -47,6 +46,21 @@ public class IpDbService {
                 .paramSource(space)
                 .update(g);
         return space.setId(Objects.requireNonNull(g.getKey()).intValue());
+    }
+
+    public IpSpace update(IpSpace space) {
+        int updated = jdbcClient.sql("""
+                        update ip_space\s
+                        set name = :name,\s
+                            description = :description,\s
+                            version = :version,\s
+                            min = :min,\s
+                            max = :max\s
+                        where id = :id
+                        """)
+                .paramSource(space)
+                .update();
+        return updated == 0 ? null : space;
     }
 
     public List<IpSpace> listSpaces(PageRequest pageRequest) {
@@ -64,8 +78,21 @@ public class IpDbService {
         return updated == 0 ? null : space;
     }
 
+    public IpRange reserve(IpRange ipRange, String min, String max) {
+        IpVersion ipVersion = lookupIpVersion(ipRange);
+        switch (ipVersion) {
+            case V4 -> ipRange.setMinFromIp(IpAddress.v4(min)).setMaxFromIp(IpAddress.v4(max));
+            case V6 -> ipRange.setMinFromIp(IpAddress.v6(min)).setMaxFromIp(IpAddress.v6(max));
+        }
+        return reserve(ipRange, ipVersion);
+    }
+
     public IpRange reserve(IpRange ipRange) {
         IpVersion ipVersion = lookupIpVersion(ipRange);
+        return reserve(ipRange, ipVersion);
+    }
+
+    private IpRange reserve(IpRange ipRange, IpVersion ipVersion) {
         int count = find(ipVersion, ipRange);
 
         if (count > 0) {
@@ -87,6 +114,14 @@ public class IpDbService {
         return ipRange.setId(id);
     }
 
+    public IpRange findRange(int spaceId, int rangeId) {
+        IpSpace ipSpace = jdbcClient.sql("select * from ip_space where id = ?").params(spaceId).query(IpSpace.class).optional().orElseThrow(IpDataNotFoundException::new);
+        int v = ipSpace.getIpVersion().getVersion();
+        IpRange ipRange = jdbcClient.sql("select * from ip_range_v" + v + " where id = ?").params(rangeId).query(IpRange.class).optional().orElseThrow(IpDataNotFoundException::new);
+        ipRange.setIpSpace(ipSpace);
+        return ipRange;
+    }
+
     public List<IpRange> listRanges(int ipSpaceId, PageRequest pageRequest) {
         return listRanges(findSpace(ipSpaceId), pageRequest);
     }
@@ -94,10 +129,14 @@ public class IpDbService {
     public List<IpRange> listRanges(IpSpace ipSpace, PageRequest pageRequest) {
         return jdbcClient
                 .sql("select * from ip_range_v" + ipSpace.getIpVersion().getVersion() +
-                        " where ip_space_id = ? limit ? offset ?")
+                        " where ip_space_id = ? " +
+                        "order by min asc " +
+                        "limit ? offset ?")
                 .params(ipSpace.getId(), pageRequest.getPageSize(), pageRequest.getOffset())
                 .query(IpRange.class)
-                .list();
+                .stream()
+                .peek(e -> e.setIpSpace(ipSpace))
+                .toList();
     }
 
     public IpRange release(IpRange ipRange) {
@@ -146,12 +185,17 @@ public class IpDbService {
     private IpVersion lookupIpVersion(IpRange ipRange) {
         if (ipRange.getIpSpace() != null && ipRange.getIpSpace().getIpVersion() != null)
             return ipRange.getIpSpace().getIpVersion();
-        return jdbcClient.sql("select version from ip_space where id = ?")
+        IpVersion ipVersion = jdbcClient.sql("select version from ip_space where id = ?")
                 .params(ipRange.getIpSpaceId())
                 .query(Integer.class)
                 .optional()
                 .map(IpVersion::from)
                 .orElseThrow(IpDataNotFoundException::new);
+        if (ipRange.getIpSpace() == null)
+            ipRange.setIpSpace(new IpSpace()
+                    .setIpVersion(ipVersion)
+                    .setId(ipRange.getIpSpaceId()));
+        return ipVersion;
     }
 
     @SuppressWarnings({"SqlDialectInspection"})
@@ -276,6 +320,13 @@ public class IpDbService {
         }
 
         public static IpAddress from(String value, IpVersion ipVersion) {
+            return switch (ipVersion) {
+                case V4 -> v4(value);
+                case V6 -> v6(value);
+            };
+        }
+
+        public static IpAddress from(BigInteger value, IpVersion ipVersion) {
             return switch (ipVersion) {
                 case V4 -> v4(value);
                 case V6 -> v6(value);
