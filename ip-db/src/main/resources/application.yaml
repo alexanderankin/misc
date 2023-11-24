@@ -1,0 +1,3 @@
+spring:
+  datasource:
+    url: jdbc:h2:file:${user.home}/ip-db.h2;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH

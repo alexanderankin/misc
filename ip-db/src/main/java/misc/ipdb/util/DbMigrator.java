@@ -3,12 +3,15 @@ package misc.ipdb.util;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.SneakyThrows;
+import lombok.extern.slf4j.Slf4j;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 
+@Slf4j
 @RequiredArgsConstructor
 public class DbMigrator {
     private final DataSource dataSource;
@@ -17,13 +20,26 @@ public class DbMigrator {
     @SneakyThrows
     public void migrate() {
         try (Connection connection = dataSource.getConnection()) {
+            int current;
+            try {
+                current = getMigration(connection);
+            } catch (Exception e) {
+                createMigrationTables(connection);
+                current = getMigration(connection);
+            }
+
             connection.setAutoCommit(false);
             try {
                 try (Statement statement = connection.createStatement()) {
                     for (Migration value : Migration.values()) {
+                        if (current >= value.ordinal()) {
+                            log.info("skipping migration {} because db is at {}", value, current);
+                            continue;
+                        }
                         for (String query : value.getSql().split(";")) {
                             statement.execute(query);
                         }
+                        statement.execute("insert into migrations(id) values(%d)".formatted(value.ordinal()));
                     }
                 }
                 connection.commit();
@@ -32,6 +48,19 @@ public class DbMigrator {
                 throw new RuntimeException("rolling back transaction", e);
             }
         }
+    }
+
+    @SneakyThrows
+    private void createMigrationTables(Connection connection) {
+        connection.createStatement().execute("create table migrations(id int)");
+        connection.createStatement().execute("insert into migrations(id) values(-1)");
+    }
+
+    @SneakyThrows
+    private int getMigration(Connection connection) {
+        ResultSet resultSet = connection.createStatement().executeQuery("select max(id) from migrations");
+        resultSet.next();
+        return resultSet.getInt(1);
     }
 
     public static void main(String[] args) {

@@ -390,7 +390,7 @@ public class IpDbService {
         static String serializeIpV4(byte[] address) {
             StringJoiner stringJoiner = new StringJoiner(".");
             for (byte b : address) {
-                stringJoiner.add(String.valueOf(b));
+                stringJoiner.add(String.valueOf(Byte.toUnsignedInt(b)));
             }
             return stringJoiner.toString();
         }
